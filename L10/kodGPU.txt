@@ -1,0 +1,144 @@
+%%cu
+#include <stdio.h>
+#include <iostream>
+#include <math.h>
+#include <chrono> 
+#include <cuda.h>
+
+using namespace std;
+
+__device__ double func(double x){
+  return(x*x + 5.2)/(sin(0.5+0.1*x*x));
+}
+
+__global__ void obliczProstokat(double* a, double c, double delta, int N){   
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;  
+  double x = c + (double)idx * delta;
+  if(idx < N){
+    a[idx] = func(x) + func(x + delta);
+  }
+}
+
+__host__ double metodaProstokatow(double a, double b, int N){    
+  double delta = (b - a)/ N;
+  cudaError_t errorcode = cudaSuccess;
+  int size = N * sizeof(double);
+  double* tabHost = (double*) malloc(size);
+  double* tabDevice;
+  if((errorcode = cudaMalloc ((void**)&tabDevice, size)) != cudaSuccess){
+    cout << "cudaMalloc(): " << cudaGetErrorString(errorcode) << endl;
+    exit(1);
+  }
+  int blockSize = 256;
+  int blockNum = N / blockSize + (N % blockSize == 0 ? 0 : 1);
+  obliczProstokat <<< blockNum, blockSize >>> (tabDevice, a, delta, N); 
+  if((errorcode = cudaMemcpy(tabHost, tabDevice, sizeof(double) * N, cudaMemcpyDeviceToHost)) != cudaSuccess){
+    cout << "cudaMemcpy(): " << cudaGetErrorString(errorcode) << endl;
+    exit(1);
+  }
+  double wynik = 0.0;
+  for(int i = 0; i < N; i++){
+    wynik += tabHost[i];
+  }
+  wynik *= delta / 2.0;
+  free(tabHost);
+  cudaFree(tabDevice);
+  return wynik;
+}
+
+__global__ void obliczTrapez(double* a, double c, double delta, int N){    
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  double x = c + (double)idx * delta;
+  if(idx < N){
+    a[idx] = delta + func(x + delta);
+  }
+}
+
+__host__ double metodaTrapezow(double c, double d, int N){    
+  double delta = (d - c)/ N;
+  cudaError_t errorcode = cudaSuccess;
+  int size = N * sizeof(double);
+  double* tabHost = (double*)malloc(size);
+  double* tabDevice;
+  if((errorcode = cudaMalloc ((void**)&tabDevice, size)) != cudaSuccess){
+    cout << "cudaMalloc(): " << cudaGetErrorString(errorcode) << endl;
+    exit(1);
+  }
+  int blockSize = 256;
+  int blockNum = N / blockSize + (N % blockSize == 0 ? 0 : 1);
+  obliczTrapez <<< blockNum, blockSize >>> (tabDevice, c, delta, N); 
+  if((errorcode = cudaMemcpy(tabHost, tabDevice, sizeof(double) * N, cudaMemcpyDeviceToHost)) != cudaSuccess){
+    cout << "cudaMemcpy(): " << cudaGetErrorString(errorcode) << endl;
+    exit(1);
+  }
+  double wynik = 0.0;
+  for(int i = 0; i < N; i++){
+    wynik += tabHost[i];
+  }
+  wynik *= delta;
+  free(tabHost);
+  cudaFree(tabDevice);
+  return wynik;
+}
+
+__device__ void ustawRdz(int* n_start, int* n_end, int n, int blockNum, int blockWidth){   
+  int threadId = blockWidth * blockIdx.x + threadIdx.x;
+  int nextThreadId = threadId + 1;
+  int threads = blockWidth * blockNum;
+  *n_start = (threadId * n)/threads;
+  *n_end = (nextThreadId * n)/threads;
+}
+
+__device__ void obliczParab(int blockNum, int blockWidth, double a, double b, int n, double* result){
+  *result = 0;
+  double h = (b - a)/n;
+  int idx_start;
+  int idx_end;
+  ustawRdz(&idx_start, &idx_end, n-1, blockNum, blockWidth);
+  for(int i = idx_start; i < idx_end; i += 2){
+    *result += (func(a  + h * (i - 1)) + 4 * func(a + h * (i)) + func(a + h * (i + 1))) * h / 3;
+  }
+}
+
+__global__ void obliczSimpson(int blockNum, int blockWidth, double* result, double a, double b, int n){
+    
+  double wynik = 0;
+  obliczParab(blockNum, blockWidth, a, b, n, &wynik);
+  result[(blockIdx.x * blockWidth + threadIdx.x)] = wynik;
+}
+
+__host__ double metodaSimpsona(double a, double b, int n){
+    
+  const int blockNum = 32;
+  const int blockWidth = 32;
+  double tabHost[blockNum*blockWidth] = {0};
+  double* tabDevice;
+  cudaMalloc ((void**)&tabDevice, sizeof(double) * blockNum * blockWidth);
+  obliczSimpson <<< blockNum, blockWidth >>> (blockNum, blockWidth, tabDevice, a, b, n );
+  cudaThreadSynchronize();
+  cudaMemcpy(tabHost, tabDevice, sizeof(double) * blockNum * blockWidth, cudaMemcpyDeviceToHost);
+  double wynik = 0;
+
+  for(int i = 0; i != blockNum *  blockWidth; i++){
+    wynik += tabHost[i];
+  }
+  cudaFree (tabDevice);
+  return wynik;
+}
+
+int main(){   
+  double a = 1;
+  double b = 4;
+  int n = 10000; 
+  auto begin = std::chrono::high_resolution_clock::now();
+  double Prostokat = metodaProstokatow(a, b, n);
+  double Trapez = metodaTrapezow(a, b, n);
+  double Simpson = metodaSimpsona(a, b, n);
+  cout << "Wynik Metoda Prostokat: " << Prostokat << endl;
+  cout << "Wynik Metoda Trapez: " << Trapez << endl;
+  cout << "Wynik Metoda Simpson: " << Simpson << endl;
+  auto end = std::chrono::high_resolution_clock::now();
+  auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin);
+  printf("Czas wykonania: %.3f seconds.\n", elapsed.count() * 1e-9);
+  return 0;
+}
